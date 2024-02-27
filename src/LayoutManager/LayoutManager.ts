@@ -30,7 +30,8 @@ export type SerializedLayoutManager = {
   strategy: string;
 };
 
-const layoutingEvents = [
+export const layoutingEvents = [
+  'modified',
   'moving',
   'resizing',
   'rotating',
@@ -82,18 +83,15 @@ export class LayoutManager {
     this._prevLayoutStrategy = strictContext.strategy;
   }
 
-  /**
-   * subscribe to object layout triggers
-   */
-  protected subscribe(
-    object: FabricObject,
+  protected attachHandlers(
+    childObject: FabricObject,
     context: RegistrationContext & Partial<StrictLayoutContext>
-  ) {
+  ): (() => void)[] {
     const { target } = context;
-    this.unsubscribe(object, context);
-    const disposers = [
-      object.on('modified', (e) =>
-        target.layoutManager.performLayout({
+    // TODO fix typescript that block us from condesing this to a single call per key.
+    return [
+      childObject.on('modified', (e) =>
+        this.performLayout({
           trigger: 'modified',
           e,
           type: LAYOUT_TYPE_OBJECT_MODIFIED,
@@ -101,18 +99,28 @@ export class LayoutManager {
         })
       ),
       ...layoutingEvents.map((key) =>
-        object.on(key, (e) => {
-          target.layoutManager.performLayout({
+        childObject.on(key, (e) => {
+          this.performLayout({
             trigger: key,
-            e: { ...e, target: object },
+            e,
             type: LAYOUT_TYPE_OBJECT_MODIFYING,
             target,
           });
         })
       ),
     ];
+  }
+
+  /**
+   * subscribe to object layout triggers
+   */
+  protected subscribe(
+    object: FabricObject,
+    context: RegistrationContext & Partial<StrictLayoutContext>
+  ) {
+    this.unsubscribe(object, context);
+    const disposers = this.attachHandlers(object, context);
     this._subscriptions.set(object, disposers);
-    return !!object.parent && !!object.group && object.group !== object.parent;
   }
 
   /**
@@ -139,31 +147,13 @@ export class LayoutManager {
   }
 
   protected onBeforeLayout(context: StrictLayoutContext) {
-    const { target } = context;
+    const { target, type } = context;
     const { canvas } = target;
     // handle layout triggers subscription
     // @TODO: gate the registration when the group is interactive
-    if (
-      context.type === LAYOUT_TYPE_INITIALIZATION ||
-      context.type === LAYOUT_TYPE_ADDED
-    ) {
-      const withDifferentParent = context.targets.filter((object) =>
-        this.subscribe(object, context)
-      );
-      // if objects have a different parent from group, they are in an active seleciton
-      // so we need to subscribe the active selection event to trigger the parent performLayout
-      withDifferentParent.forEach(({ group, parent }) => {
-        if (parent) {
-          // we may subscribe an active selection more than once,
-          // on each parent's layout manager.
-          // each parent's can subscribe itself just once because of unsubscribe
-          parent.layoutManager.subscribe(group!, {
-            ...context,
-            target: parent,
-          });
-        }
-      });
-    } else if (context.type === LAYOUT_TYPE_REMOVED) {
+    if (type === LAYOUT_TYPE_INITIALIZATION || type === LAYOUT_TYPE_ADDED) {
+      this.subscribeTargets(context);
+    } else if (type === LAYOUT_TYPE_REMOVED) {
       this.unsubscribeTargets(context);
     }
     // fire layout event (event will fire only for layouts after initialization layout)
@@ -176,7 +166,7 @@ export class LayoutManager {
         context,
       });
 
-    if (context.type === LAYOUT_TYPE_IMPERATIVE && context.deep) {
+    if (type === LAYOUT_TYPE_IMPERATIVE && context.deep) {
       const { strategy: _, ...tricklingContext } = context;
       // traverse the tree
       target.forEachObject(
